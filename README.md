@@ -6,13 +6,15 @@ A production-grade algorithmic trading system implementing Grid and Stop-and-Rev
 
 ```bash
 # Install dependencies
-pip install -e .
+pip install -e .[dev]
 
 # Run tests
 python -m pytest
 
-# Run demonstration
+# Run demonstrations
 python examples/grid_backtest_example.py
+python examples/async_feed_example.py
+python examples/macro_regime_example.py
 ```
 
 ## Architecture
@@ -20,13 +22,109 @@ python examples/grid_backtest_example.py
 The system follows a layered architecture with clear separation of concerns:
 
 ```
-Market Data -> Indicators -> Strategy -> Risk Manager -> Order Manager -> Broker
-                                                                           |
-                                                                         Fills
-                                                                           |
-                                                                        Position
-                                                                           |
-                                                                          P&L
+Replay/Mock Data
+       |
+       v
+ Async Producer
+       |
+       v
+ Bounded Queue (back-pressure)
+       |
+       v
+ Consumer
+       |
+       v
+ Indicators -> Strategy <- Macro Regime (parameter overrides)
+                  |              |
+                  v              v (circuit breaker)
+            Risk Manager
+                  |
+                  v
+            Order Manager
+                  |
+                  v
+               Broker
+                  |
+                Fills
+                  |
+              Position
+                  |
+                 P&L
+```
+
+### Market Data and Broker Environment
+
+The system is broker-agnostic and designed for clean separation between data sources and trading logic:
+
+1. **Mock/Replay Data**: Assessment uses deterministic mock and CSV replay data - no live credentials required
+2. **Async Queue Boundary**: The bounded `asyncio.Queue` models the interface where a real WebSocket feed would connect
+3. **Back-Pressure**: Queue size limits prevent unbounded memory growth during data bursts
+4. **Graceful Shutdown**: Producer and consumer coordinate cleanly without leaving tasks running
+5. **Broker Interface**: Abstract base allows plugging in real broker implementations (e.g., Zerodha Kite Connect) later
+
+The async queue architecture demonstrates production patterns for handling real-time market data without requiring actual broker API access during development and testing.
+
+## Observability and Reconciliation
+
+Phase 3 adds a comprehensive observability layer providing structured logging, trade blotters, and reconciliation:
+
+### Structured Logging
+- **JSON event logging**: Machine-readable logs with consistent schema
+- **Event types**: ORDER_SUBMITTED, ORDER_FILLED, ORDER_REJECTED, POSITION_CHANGED, RISK_REJECTED, CIRCUIT_BREAKER_TRIGGERED, RECONCILIATION_MISMATCH, etc.
+- **Log levels**: Automatic level assignment (INFO for fills, WARNING for rejections, ERROR for mismatches)
+- **Security**: Sensitive fields (tokens, passwords) automatically filtered
+
+### Trade Blotter
+- **Canonical record**: CSV-backed blotter records all executed trades
+- **Idempotency**: Uses fill_id to prevent duplicate records
+- **Audit trail**: Includes timestamp, instrument, side, quantity, price, strategy, costs, realized P&L
+- **Persistence**: Survives restarts, provides complete trading history
+
+### Position Reconciliation
+- **Internal vs Broker**: Compares internal position tracking against broker positions
+- **Mismatch detection**: Identifies quantity differences by symbol
+- **Missing/extra symbols**: Detects positions that exist in one source but not the other
+- **Reporting**: Generates detailed reconciliation reports with status indicators
+
+### P&L Reconciliation
+- **Tolerance-based**: Configurable floating-point tolerance for P&L comparison
+- **Backtest vs Live**: Reconcile backtest results against live/broker P&L
+- **Blotter reconciliation**: Compare any P&L calculation against canonical blotter records
+- **Precision**: Handles floating-point arithmetic correctly
+
+### Alert Abstraction
+- **AlertSink protocol**: Clean interface for notification systems
+- **Implementations**: LoggingAlertSink (for assessment), CollectingAlertSink (for tests)
+- **Extension ready**: Can plug in SMS, Telegram, Slack, or email providers
+- **Trigger criteria**: Alerts on position mismatches, material P&L differences, circuit breakers, engine errors
+
+### Integration
+The observability layer integrates as a separate cross-cutting concern:
+- **Minimal coupling**: Core domain objects (Position, Order, Fill) remain unchanged
+- **Dependency injection**: Observability components injected at application boundaries
+- **Optional**: Existing code works without observability (backward compatible)
+- **Event boundaries**: Events emitted from OrderManager, RiskManager, MacroRegimeEngine
+
+### Reconciliation Flow
+```
+Trading Engine → Internal Position State
+                       |
+                       ↓
+               [Reconciliation]
+                       |
+          +------------+------------+
+          |                         |
+    Broker Positions          Expected P&L
+          |                         |
+          ↓                         ↓
+      [Compare]               [Compare]
+          |                         |
+    ✓ MATCH / ✗ MISMATCH      ✓ MATCH / ✗ MISMATCH
+          |                         |
+          +------------+------------+
+                       |
+                       ↓
+                  🚨 ALERT (if mismatch)
 ```
 
 ## Components
@@ -47,6 +145,14 @@ Abstraction for order execution with failure mode handling:
 Abstraction for historical and live data:
 - MarketData interface: Abstract base for data providers
 - MockMarketData: Simulated historical bars and tick streams
+- ReplayMarketData: CSV-based deterministic replay feed for testing
+- AsyncMarketDataFeed: Asynchronous producer/consumer pipeline with back-pressure
+
+### Contract Management
+Derivative instrument lifecycle:
+- ContractMaster: Registry of contracts with expiry information
+- RolloverManager: Determines when to roll contracts based on expiry windows
+- Expiry handling: Explicit contract transitions, no silent rollovers
 
 ### Technical Indicators
 Four categories with shared mathematical utilities:
@@ -72,7 +178,17 @@ Four categories with shared mathematical utilities:
 Position and exposure controls:
 - Position caps (configurable max long/short)
 - Kill switch (blocks new exposure, allows reduction)
+- Circuit breaker integration (from macro regime)
 - Risk decisions with rejection reasons
+
+### Macro Regime Engine
+Market environment classification and parameter adaptation:
+- **Regime Classification**: RISK_ON, NEUTRAL, RISK_OFF based on macro indicators
+- **Macro Inputs**: Volatility, trend, sentiment proxies (deterministic, no live APIs)
+- **Scoring System**: Weighted combination of normalized indicators
+- **Parameter Overrides**: Regime-specific strategy parameters (grid spacing, pyramid levels, stops)
+- **Circuit Breaker**: Extreme volatility blocks risk-increasing positions
+- **Integration**: Flows to RiskManager without replacing it
 
 ### Order Manager
 Production-ready order lifecycle management:
@@ -90,6 +206,9 @@ Realistic historical simulation:
 - P&L reconciliation
 
 ## Key Design Decisions
+
+### Macro Regime Engine
+The system adapts to market conditions through deterministic regime classification. Macro indicators (volatility, trend, sentiment) are weighted and scored to classify the environment as RISK_ON, NEUTRAL, or RISK_OFF. Each regime applies different strategy parameters (grid spacing, pyramid levels, stop distances). Extreme volatility triggers a circuit breaker that blocks new risk-increasing positions through the RiskManager, but does not force liquidation of existing positions. The engine is fully deterministic and requires no live APIs - it operates on normalized indicator proxies.
 
 ### Idempotency
 Orders use client_order_id as an idempotency key. Retrying the same order ID returns the original fill instead of creating duplicates. This makes network retries safe.
@@ -151,16 +270,20 @@ print(f"Returns: {result.returns_pct:.2f}%")
 
 ```
 src/
-├── core/           # Domain objects (Order, Position, Fill, etc.)
+├── core/           # Domain objects (Order, Position, Fill, Instrument, etc.)
+├── contracts/      # Contract master and rollover management
 ├── broker/         # Broker abstraction and MockBroker
-├── market_data/    # Market data abstraction and MockMarketData
+├── market_data/    # Market data: Mock, Replay, Async feeds
 ├── indicators/     # Technical indicators (ATR, RSI, EMA, OBV)
 ├── strategy/       # Trading strategies (Grid, Stop-and-Reverse)
 ├── risk/           # Risk management
+├── macro/          # Macro regime engine
 ├── execution/      # Order manager
-└── backtest/       # Backtesting engine
+├── backtest/       # Backtesting engine
+└── observability/  # Logging, blotter, reconciliation, alerts (NEW)
 
-tests/              # 140 tests
+data/               # Sample CSV data for replay
+tests/              # 270+ tests
 examples/           # End-to-end demonstrations
 ```
 
@@ -225,23 +348,35 @@ Strategies generate trading intent. Risk enforces constraints. This separation a
 
 ## Status
 
-Production-ready components:
-- Both execution engines (Grid, Stop-and-Reverse)
-- All technical indicator categories
-- Risk management
-- Order management with production patterns
-- Backtesting with realistic costs
-- 140 passing tests
+**Complete and Production-Ready:**
+- ✅ Both execution engines (Grid, Stop-and-Reverse)
+- ✅ All technical indicator categories (ATR, RSI, EMA, OBV)
+- ✅ Risk management with circuit breaker integration
+- ✅ Macro regime engine with parameter adaptation
+- ✅ Order management with idempotency and reconciliation
+- ✅ Contract master and rollover management
+- ✅ Replay and async market data feeds with back-pressure
+- ✅ Backtesting with realistic costs and slippage
+- ✅ Observability layer with structured logging, trade blotter, reconciliation, alerts
+- ✅ **276 passing tests**
 
-Architecture ready but not implemented:
-- Live broker API integration
-- WebSocket real-time data
-- Observability infrastructure
-- Macro regime engine
+**Architecture Demonstrated (Partial):**
+- ⚠️ Broker resilience utilities (retry with exponential backoff, auth abstraction, rate limiting)
+- ⚠️ Note: These are utility components demonstrating the architecture; not integrated with mock broker
+
+**Not Required for Mock Environment:**
+- Live Zerodha broker API integration
+- WebSocket connectivity
+- External notification systems (SMS/Telegram/Slack)
 
 ## Running the Demo
 
-The end-to-end demonstration shows:
+The end-to-end demonstrations show:
+
+**Grid Backtest:**
+```bash
+python examples/grid_backtest_example.py
+```
 1. Data generation (100 bars)
 2. Indicator calculation (ATR, RSI)
 3. Strategy signal generation (Grid)
@@ -249,11 +384,16 @@ The end-to-end demonstration shows:
 5. Backtest execution with costs
 6. Full P&L breakdown
 
+**Observability:**
 ```bash
-python examples/grid_backtest_example.py
+python examples/observability_example.py
 ```
-
-Output includes trade details, P&L breakdown, and system validation.
+1. Structured JSON logging of trading events
+2. Trade blotter recording with idempotency
+3. Position reconciliation (matching & mismatch)
+4. P&L reconciliation with tolerance
+5. Alert generation on mismatches
+6. Complete reconciliation reports
 
 ## License
 

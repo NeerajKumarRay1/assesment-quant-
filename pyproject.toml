@@ -8,10 +8,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "mypy>=1.9"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "mypy>=1.9"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [build-system]
 requires = ["setuptools>=68"]

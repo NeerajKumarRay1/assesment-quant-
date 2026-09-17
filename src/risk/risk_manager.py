@@ -49,7 +49,8 @@ class RiskManager:
         self,
         instrument: str,
         desired_quantity: int,
-        current_position: Position
+        current_position: Position,
+        circuit_breaker_active: bool = False
     ) -> RiskDecision:
         """Evaluate if desired quantity is allowed under current risk constraints.
         
@@ -57,6 +58,7 @@ class RiskManager:
             instrument: Instrument symbol (must match current_position.instrument)
             desired_quantity: Target net position the strategy wants
             current_position: Current position state
+            circuit_breaker_active: If True, blocks risk-increasing positions (from macro regime)
             
         Returns:
             RiskDecision with allowed flag, actual target quantity, and rejection reason
@@ -66,6 +68,8 @@ class RiskManager:
             current=+5, desired=+7, cap=+5 → allowed=True, target=+5 (no increase)
             current=0, desired=+3, kill_switch=True → allowed=False (blocked)
             current=+5, desired=0, kill_switch=True → allowed=True (reduction OK)
+            current=0, desired=+3, circuit_breaker=True → allowed=False (blocked by macro)
+            current=+5, desired=+3, circuit_breaker=True → allowed=True (reduction OK)
         """
         if instrument != current_position.instrument:
             return RiskDecision(
@@ -75,6 +79,18 @@ class RiskManager:
             )
 
         current_qty = current_position.quantity
+
+        # Circuit breaker (from macro regime): block new or increased exposure, allow reduction
+        if circuit_breaker_active:
+            is_new_exposure = (current_qty == 0 and desired_quantity != 0)
+            is_increasing_exposure = abs(desired_quantity) > abs(current_qty)
+            
+            if is_new_exposure or is_increasing_exposure:
+                return RiskDecision(
+                    allowed=False,
+                    target_quantity=current_qty,
+                    rejection_reason="Circuit breaker active (macro regime): no new or increased exposure allowed"
+                )
 
         # Kill switch: block new or increased exposure, allow reduction
         if self.kill_switch:

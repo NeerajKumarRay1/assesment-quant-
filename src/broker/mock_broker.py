@@ -1,5 +1,5 @@
 from src.broker.base import Broker
-from src.core.order import Order, Fill
+from src.core.order import Order, Fill, OrderStatus
 
 
 class BrokerRejected(Exception):
@@ -27,6 +27,10 @@ class MockBroker(Broker):
         self._force_outcome = force_outcome
         self.fills: list[Fill] = []
         self.seen_order_ids: set[str] = set()   # duplicate-submission tracking
+        
+        # Phase 4: Store positions and P&L for query methods
+        self._positions: dict[str, int] = {}
+        self._pnl: float = 0.0
 
     def submit_order(self, order: Order) -> Fill:
         if order.client_order_id in self.seen_order_ids:
@@ -53,4 +57,30 @@ class MockBroker(Broker):
         )
         self.fills.append(fill)
         self.seen_order_ids.add(order.client_order_id)
+        
+        # Update internal position tracking
+        signed_qty = fill.quantity if fill.side.value == "BUY" else -fill.quantity
+        self._positions[fill.instrument] = self._positions.get(fill.instrument, 0) + signed_qty
+        
         return fill
+    
+    # Phase 4: Implement query methods
+    
+    def get_order(self, client_order_id: str) -> tuple[OrderStatus, Fill | None] | None:
+        """Query order status from mock broker."""
+        if client_order_id in self.seen_order_ids:
+            fill = next(f for f in self.fills if f.order_id == client_order_id)
+            return (OrderStatus.FILLED, fill)
+        return None
+    
+    def get_positions(self) -> dict[str, int]:
+        """Get current positions from mock broker."""
+        return self._positions.copy()
+    
+    def get_pnl(self) -> float:
+        """Get current P&L from mock broker."""
+        return self._pnl
+    
+    def set_pnl(self, pnl: float) -> None:
+        """Set P&L for testing."""
+        self._pnl = pnl
