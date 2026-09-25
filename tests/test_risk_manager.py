@@ -238,3 +238,44 @@ def test_risk_decision_is_frozen():
     
     with pytest.raises(dataclasses.FrozenInstanceError):
         decision.allowed = False
+
+
+@pytest.mark.parametrize("kill_switch,circuit_breaker", [(True, False), (False, True)])
+@pytest.mark.parametrize("current,desired", [(5, -5), (5, -3), (-4, 2)])
+def test_blocking_controls_do_not_allow_reversal(kill_switch, circuit_breaker, current, desired):
+    """A flip through zero opens new exposure: only the flattening leg is allowed."""
+    risk = RiskManager(max_position=10, kill_switch=kill_switch)
+    pos = Position(instrument="NIFTY", quantity=current)
+
+    decision = risk.evaluate("NIFTY", desired, pos, circuit_breaker_active=circuit_breaker)
+
+    assert decision.allowed is True
+    assert decision.target_quantity == 0
+    assert "reversal blocked" in decision.rejection_reason
+
+
+def test_reversal_allowed_without_blocking_controls():
+    risk = RiskManager(max_position=10)
+    pos = Position(instrument="NIFTY", quantity=5)
+    decision = risk.evaluate("NIFTY", -5, pos)
+    assert decision.allowed is True
+    assert decision.target_quantity == -5
+
+
+def test_risk_manager_emits_rejection_events():
+    from src.observability.events import EventType
+
+    class Collect:
+        def __init__(self):
+            self.events = []
+
+        def log_event(self, event):
+            self.events.append(event)
+
+    sink = Collect()
+    risk = RiskManager(max_position=5, kill_switch=True, event_logger=sink)
+    risk.evaluate("NIFTY", 3, Position(instrument="NIFTY"))
+    risk.evaluate("NIFTY", 0, Position(instrument="NIFTY", quantity=2))  # reduction: no event
+
+    assert len(sink.events) == 1
+    assert sink.events[0].event_type == EventType.RISK_REJECTED

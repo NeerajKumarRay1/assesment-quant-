@@ -50,8 +50,8 @@ def test_backtest_single_buy_and_hold():
     engine = BacktestEngine()
     bars = create_bars("NIFTY", 10, start_price=100.0)
     
-    # Buy at bar 0, hold through bars 1-8, implicit sell at bar 9
-    targets = [1, 1, 1, 1, 1, 1, 1, 1, 1, 0]
+    # Buy signal at bar 0, flat signal at bar 8 (filled at bar 9 open)
+    targets = [1, 1, 1, 1, 1, 1, 1, 1, 0, 0]
     
     result = engine.run_simple(bars, targets)
     
@@ -96,10 +96,10 @@ def test_backtest_with_fixed_percentage_slippage():
     engine = BacktestEngine(slippage_model=slippage)
     
     bars = create_bars("NIFTY", 5, start_price=100.0)
-    targets = [1, 1, 1, 1, 0]  # Buy, hold, sell
-    
+    targets = [1, 1, 1, 0, 0]  # Buy, hold, sell (exit filled at bar 4 open)
+
     result = engine.run_simple(bars, targets)
-    
+
     # Buy at 101 + 1% = 102.01
     buy_fill = result.fills[0]
     assert buy_fill.price == pytest.approx(102.01)
@@ -117,9 +117,9 @@ def test_backtest_with_transaction_costs():
     """Transaction costs should reduce net P&L."""
     costs = FixedCostPerTrade(cost_per_trade=10.0)
     engine = BacktestEngine(cost_model=costs)
-    
+
     bars = create_bars("NIFTY", 5, start_price=100.0)
-    targets = [1, 1, 1, 1, 0]
+    targets = [1, 1, 1, 0, 0]
     
     result = engine.run_simple(bars, targets)
     
@@ -137,7 +137,7 @@ def test_backtest_with_risk_manager():
     engine = BacktestEngine()
     
     bars = create_bars("NIFTY", 5, start_price=100.0)
-    targets = [5, 5, 5, 5, 0]  # Try to buy 5, but risk caps at 2
+    targets = [5, 5, 5, 0, 0]  # Try to buy 5, but risk caps at 2
     
     result = engine.run_simple(bars, targets, risk_manager=risk)
     
@@ -186,10 +186,10 @@ def test_backtest_equity_curve_tracks_value():
 def test_backtest_multiple_round_trips():
     """Multiple buy-sell cycles."""
     engine = BacktestEngine()
-    bars = create_bars("NIFTY", 10, start_price=100.0)
-    
-    # Buy, sell, buy, sell
-    targets = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+    bars = create_bars("NIFTY", 11, start_price=100.0)
+
+    # Buy, sell, buy, sell (final bar's signal can't be executed)
+    targets = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0]
     
     result = engine.run_simple(bars, targets)
     
@@ -202,8 +202,8 @@ def test_backtest_short_position():
     engine = BacktestEngine()
     bars = create_bars("NIFTY", 5, start_price=100.0)
     
-    # Short 1
-    targets = [-1, -1, -1, -1, 0]
+    # Short 1, cover on bar 3 signal (filled at bar 4 open)
+    targets = [-1, -1, -1, 0, 0]
     
     result = engine.run_simple(bars, targets)
     
@@ -312,9 +312,9 @@ def test_cost_model_indian_futures():
     buy_fill = Fill(order_id="x", instrument="NIFTY", side=Side.BUY, quantity=50, price=18000.0)
     buy_costs = model.calculate_costs(buy_fill)
     
-    # Should include: brokerage + exchange + GST (no STT on buy)
+    # Should include: brokerage + exchange + SEBI + GST + stamp duty (no STT on buy)
     assert buy_costs > 20.0  # At least brokerage
-    assert buy_costs < 50.0  # Reasonable total
+    assert buy_costs < 100.0  # Reasonable total on ₹9L notional
     
     # Sell fill (includes STT)
     sell_fill = Fill(order_id="y", instrument="NIFTY", side=Side.SELL, quantity=50, price=18000.0)
@@ -343,9 +343,64 @@ def test_backtest_final_position_correct():
     """Final position should match last target."""
     engine = BacktestEngine()
     bars = create_bars("NIFTY", 5, start_price=100.0)
-    targets = [1, 2, 3, 2, 1]  # End with position of 1
-    
+    targets = [1, 2, 3, 1, 1]  # Bar 3 signal (1) fills at bar 4; bar 4 signal can't fill
+
     result = engine.run_simple(bars, targets)
-    
+
     # Final position = 1
     assert result.final_position.quantity == 1
+
+
+def test_backtest_last_bar_signal_is_not_executed():
+    """No bar after the last one → its signal has no open to trade at."""
+    engine = BacktestEngine()
+    bars = create_bars("NIFTY", 5, start_price=100.0)
+    targets = [1, 1, 1, 1, 0]
+
+    result = engine.run_simple(bars, targets)
+
+    assert result.total_trades == 1
+    assert result.final_position.quantity == 1
+    # Open position is marked to market at final close: 104 - 101
+    assert result.gross_pnl == 3.0
+
+
+def test_backtest_equity_curve_one_point_per_bar():
+    """Equity curve = initial capital + one mark per bar, using only past fills."""
+    engine = BacktestEngine()
+    bars = create_bars("NIFTY", 5, start_price=100.0)
+    targets = [1, 1, 1, 1, 1]
+
+    result = engine.run_simple(bars, targets, initial_capital=1000.0)
+
+    assert len(result.equity_curve) == len(bars) + 1
+    # Bar 0: signal only, no fill yet → still flat
+    assert result.equity_curve[1] == 1000.0
+    # Bar 1: bought at 101 open, close 101 → 0; bar 4: close 104 → +3
+    assert result.equity_curve[2] == 1000.0
+    assert result.equity_curve[-1] == 1003.0
+
+
+def test_backtest_equity_curve_has_point_when_risk_rejects():
+    """Rejected signals must not create gaps in the equity curve."""
+    risk = RiskManager(max_position=10, kill_switch=True)
+    engine = BacktestEngine()
+    bars = create_bars("NIFTY", 5)
+
+    result = engine.run_simple(bars, [1] * 5, risk_manager=risk)
+
+    assert len(result.equity_curve) == len(bars) + 1
+
+
+def test_backtest_lot_size_scales_pnl_and_costs():
+    """Quantities are lots; P&L and notional-based costs scale by lot size."""
+    bars = create_bars("NIFTY", 5, start_price=100.0)
+    targets = [1, 1, 1, 0, 0]
+
+    one = BacktestEngine(cost_model=IndianEquityFuturesCosts()).run_simple(bars, targets)
+    lots = BacktestEngine(cost_model=IndianEquityFuturesCosts()).run_simple(bars, targets, lot_size=75)
+
+    assert one.gross_pnl == 3.0
+    assert lots.gross_pnl == 3.0 * 75
+    # Flat brokerage doesn't scale, percentage charges do
+    assert one.transaction_costs < lots.transaction_costs < one.transaction_costs * 75

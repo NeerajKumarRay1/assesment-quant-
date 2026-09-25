@@ -85,8 +85,6 @@ class StopAndReverseStrategy:
         if instrument != current_position.instrument:
             raise ValueError(f"Instrument mismatch: {instrument} != {current_position.instrument}")
         
-        current_state = self._get_current_state(current_position.quantity)
-        
         # Determine signal based on RSI
         if rsi < self.rsi_oversold:
             # Bullish signal - want to be long

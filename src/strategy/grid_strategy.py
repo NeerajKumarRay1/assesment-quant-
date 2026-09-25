@@ -11,7 +11,7 @@ class GridState:
     Used to remember entry price and number of pyramid levels added.
     """
     entry_price: float
-    pyramid_count: int  # how many times we've added to this position
+    pyramid_count: int  # grid levels held, synced from the actual position each bar
     direction: int      # +1 for long, -1 for short
 
 
@@ -25,8 +25,9 @@ class GridStrategy:
     - When flat and RSI > 70 (overbought) → go short 1 unit
     
     PYRAMIDING:
-    - If long and price rises by grid_spacing → add 1 more unit
-    - If short and price falls by grid_spacing → add 1 more unit
+    - Level k sits at entry ± k × grid_spacing (k = levels already held)
+    - Long: price reaches the next level above entry → add 1 more unit
+    - Short: price reaches the next level below entry → add 1 more unit
     - Maximum pyramid_count limited by max_pyramid_levels
     
     EXIT:
@@ -42,7 +43,7 @@ class GridStrategy:
     Stop loss = 10 × 2.0 = 20
     
     Entry at 100 (long):
-    - Add pyramid at 115 (if max_pyramids allows)
+    - Add pyramid at 115, then 130 (if max_pyramids allows)
     - Stop loss at 80
     """
 
@@ -132,13 +133,16 @@ class GridStrategy:
                 self._clear_grid_state(instrument)
                 return 0
             
-            # Check if we can add pyramid level
+            # Levels are derived from the ACTUAL position, not from what we asked for last
+            # time. If risk rejected (or capped) a previous add, the count doesn't advance.
+            grid_state.pyramid_count = abs(current_qty) // self.position_size
+
+            # Level k (k = levels already held) sits at entry ± k * grid_spacing, so each
+            # add needs a fresh favorable move rather than firing every bar past level 1.
             if grid_state.pyramid_count < self.max_pyramid_levels:
-                if self._should_add_pyramid(current_price, grid_state.entry_price, grid_spacing, grid_state.direction):
-                    # Add one more level
-                    new_qty = current_qty + (self.position_size * grid_state.direction)
-                    grid_state.pyramid_count += 1
-                    return new_qty
+                next_level_price = grid_state.entry_price + grid_state.direction * grid_spacing * grid_state.pyramid_count
+                if self._should_add_pyramid(current_price, next_level_price, grid_state.direction):
+                    return current_qty + (self.position_size * grid_state.direction)
             
             # Hold current position
             return current_qty
@@ -172,12 +176,12 @@ class GridStrategy:
         else:  # short position
             return current_price > (entry_price + stop_distance)
 
-    def _should_add_pyramid(self, current_price: float, entry_price: float, grid_spacing: float, direction: int) -> bool:
-        """Check if price has moved favorably enough to add pyramid level."""
+    def _should_add_pyramid(self, current_price: float, level_price: float, direction: int) -> bool:
+        """Check if price has reached the next pyramid level."""
         if direction > 0:  # long position
-            return current_price >= (entry_price + grid_spacing)
+            return current_price >= level_price
         else:  # short position
-            return current_price <= (entry_price - grid_spacing)
+            return current_price <= level_price
 
     def _clear_grid_state(self, instrument: str) -> None:
         """Clear grid state when exiting position."""

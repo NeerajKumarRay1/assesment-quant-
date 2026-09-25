@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from src.core.position import Position
+from src.observability.events import EventLogger, create_risk_rejected_event
 
 
 @dataclass(frozen=True)
@@ -31,19 +32,26 @@ class RiskManager:
     - Make trading decisions
     """
 
-    def __init__(self, max_position: int, kill_switch: bool = False):
+    def __init__(
+        self,
+        max_position: int,
+        kill_switch: bool = False,
+        event_logger: "EventLogger | None" = None,
+    ):
         """Initialize risk manager.
         
         Args:
             max_position: Maximum allowed net position (positive for long, negative for short).
                          Example: max_position=5 allows +5 long or -5 short.
             kill_switch: If True, blocks all new exposure but allows reducing positions.
+            event_logger: Optional sink for RISK_REJECTED events (e.g. StructuredLogger).
         """
         if max_position <= 0:
             raise ValueError("max_position must be positive")
         
         self.max_position = max_position
         self.kill_switch = kill_switch
+        self._event_logger = event_logger
 
     def evaluate(
         self,
@@ -70,6 +78,7 @@ class RiskManager:
             current=+5, desired=0, kill_switch=True → allowed=True (reduction OK)
             current=0, desired=+3, circuit_breaker=True → allowed=False (blocked by macro)
             current=+5, desired=+3, circuit_breaker=True → allowed=True (reduction OK)
+            current=+5, desired=-5, kill_switch=True → allowed=True, target=0 (flip blocked, flatten only)
         """
         if instrument != current_position.instrument:
             return RiskDecision(
@@ -80,29 +89,17 @@ class RiskManager:
 
         current_qty = current_position.quantity
 
-        # Circuit breaker (from macro regime): block new or increased exposure, allow reduction
-        if circuit_breaker_active:
-            is_new_exposure = (current_qty == 0 and desired_quantity != 0)
-            is_increasing_exposure = abs(desired_quantity) > abs(current_qty)
-            
-            if is_new_exposure or is_increasing_exposure:
-                return RiskDecision(
-                    allowed=False,
-                    target_quantity=current_qty,
-                    rejection_reason="Circuit breaker active (macro regime): no new or increased exposure allowed"
-                )
-
-        # Kill switch: block new or increased exposure, allow reduction
-        if self.kill_switch:
-            is_new_exposure = (current_qty == 0 and desired_quantity != 0)
-            is_increasing_exposure = abs(desired_quantity) > abs(current_qty)
-            
-            if is_new_exposure or is_increasing_exposure:
-                return RiskDecision(
-                    allowed=False,
-                    target_quantity=current_qty,
-                    rejection_reason="Kill switch active: no new or increased exposure allowed"
-                )
+        # Circuit breaker (from macro regime) and kill switch share the same rule:
+        # block new or increased exposure, allow reduction.
+        for active, label in (
+            (circuit_breaker_active, "Circuit breaker active (macro regime)"),
+            (self.kill_switch, "Kill switch active"),
+        ):
+            if active:
+                decision = self._restrict_to_reduction(current_qty, desired_quantity, label)
+                if decision is not None:
+                    self._emit_rejection(instrument, desired_quantity, decision)
+                    return decision
 
         # Apply position cap
         capped_quantity = self._apply_position_cap(desired_quantity)
@@ -115,6 +112,34 @@ class RiskManager:
             target_quantity=capped_quantity,
             rejection_reason=f"Position capped from {desired_quantity} to {capped_quantity}" if was_capped else None
         )
+
+    @staticmethod
+    def _restrict_to_reduction(current_qty: int, desired_quantity: int, label: str) -> RiskDecision | None:
+        """Allow only exposure-reducing moves. Returns None if desired move is a pure reduction.
+
+        A flip through zero (e.g. +5 -> -3) is NOT a reduction: it opens new exposure
+        on the other side. The closing leg is still allowed, so the target becomes flat.
+        """
+        is_flip = current_qty != 0 and desired_quantity != 0 and (current_qty > 0) != (desired_quantity > 0)
+        if is_flip:
+            return RiskDecision(
+                allowed=True,
+                target_quantity=0,
+                rejection_reason=f"{label}: reversal blocked, flattening only",
+            )
+        if abs(desired_quantity) > abs(current_qty):
+            return RiskDecision(
+                allowed=False,
+                target_quantity=current_qty,
+                rejection_reason=f"{label}: no new or increased exposure allowed",
+            )
+        return None
+
+    def _emit_rejection(self, instrument: str, desired_quantity: int, decision: RiskDecision) -> None:
+        if self._event_logger is not None and decision.rejection_reason:
+            self._event_logger.log_event(
+                create_risk_rejected_event(instrument, desired_quantity, decision.rejection_reason)
+            )
 
     def _apply_position_cap(self, desired_quantity: int) -> int:
         """Apply position cap constraints.

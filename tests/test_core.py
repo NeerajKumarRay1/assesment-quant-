@@ -73,3 +73,12 @@ def test_signal_is_frozen():
     sig = Signal(instrument="NIFTY", side=Side.BUY)
     with pytest.raises(dataclasses.FrozenInstanceError):
         sig.strength = 2.0
+
+def test_position_pnl_scales_with_multiplier():
+    """Lot-size multiplier scales realized and unrealized P&L."""
+    pos = Position(instrument="NIFTY", multiplier=75)
+    pos.apply_fill(Fill(order_id="a", instrument="NIFTY", side=Side.BUY, quantity=2, price=100.0))
+    assert pos.unrealized_pnl(101.0) == 2 * 1.0 * 75
+
+    pos.apply_fill(Fill(order_id="b", instrument="NIFTY", side=Side.SELL, quantity=1, price=104.0))
+    assert pos.realized_pnl == 1 * 4.0 * 75

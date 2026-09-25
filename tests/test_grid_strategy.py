@@ -326,3 +326,49 @@ def test_grid_state_is_tracked_per_instrument():
     
     # Both should have independent states
     assert len(strategy._grid_states) == 2
+
+
+def test_grid_does_not_pyramid_every_bar_at_same_price():
+    """Each add needs price to reach the NEXT level (entry + k*spacing), not just level 1."""
+    strategy = GridStrategy(grid_spacing_atr_multiplier=1.0, max_pyramid_levels=4)
+    pos = Position(instrument="NIFTY")
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 100.0, pos, atr=10.0, rsi=25.0)
+    pos.avg_price = 100.0
+
+    targets = []
+    for _ in range(3):
+        pos.quantity = strategy.calculate_target_quantity("NIFTY", 111.0, pos, atr=10.0)
+        targets.append(pos.quantity)
+
+    assert targets == [2, 2, 2]  # one add at level 1 (110); level 2 needs 120
+
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 120.0, pos, atr=10.0)
+    assert pos.quantity == 3
+
+
+def test_grid_pyramid_count_tracks_actual_position_when_risk_rejects():
+    """If the add is rejected (position unchanged), the level count must not advance."""
+    strategy = GridStrategy(grid_spacing_atr_multiplier=1.0, max_pyramid_levels=3)
+    pos = Position(instrument="NIFTY")
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 100.0, pos, atr=10.0, rsi=25.0)
+    pos.avg_price = 100.0
+
+    # Strategy asks to add three times, risk rejects each time → position stays 1
+    for _ in range(3):
+        assert strategy.calculate_target_quantity("NIFTY", 110.0, pos, atr=10.0) == 2
+
+    assert strategy._grid_states["NIFTY"].pyramid_count == 1
+
+
+def test_short_grid_levels_step_downward():
+    strategy = GridStrategy(grid_spacing_atr_multiplier=1.0, max_pyramid_levels=3)
+    pos = Position(instrument="NIFTY")
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 100.0, pos, atr=10.0, rsi=75.0)
+    pos.avg_price = 100.0
+
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 90.0, pos, atr=10.0)
+    assert pos.quantity == -2
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 89.0, pos, atr=10.0)
+    assert pos.quantity == -2  # next level is 80
+    pos.quantity = strategy.calculate_target_quantity("NIFTY", 80.0, pos, atr=10.0)
+    assert pos.quantity == -3

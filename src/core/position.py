@@ -14,6 +14,7 @@ class Position:
     quantity: int = 0          # positive = long, negative = short
     avg_price: float = 0.0
     realized_pnl: float = 0.0
+    multiplier: int = 1        # contract lot size: P&L per 1-point move per unit of quantity
 
     def apply_fill(self, fill: Fill) -> None:
         if fill.instrument != self.instrument:
@@ -33,7 +34,7 @@ class Position:
         if is_reducing:
             closed_qty = min(abs(signed_qty), abs(self.quantity))
             direction = 1 if self.quantity > 0 else -1
-            self.realized_pnl += direction * closed_qty * (fill.price - self.avg_price)
+            self.realized_pnl += direction * closed_qty * (fill.price - self.avg_price) * self.multiplier
 
         if new_quantity == 0:
             self.avg_price = 0.0
@@ -50,4 +51,4 @@ class Position:
     def unrealized_pnl(self, current_price: float) -> float:
         if self.quantity == 0:
             return 0.0
-        return self.quantity * (current_price - self.avg_price)
+        return self.quantity * (current_price - self.avg_price) * self.multiplier
