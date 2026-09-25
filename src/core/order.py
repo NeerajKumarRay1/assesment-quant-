@@ -11,6 +11,8 @@ class Side(Enum):
 
 class OrderStatus(Enum):
     PENDING = "PENDING"
+    SUBMITTED = "SUBMITTED"
+    TIMEOUT = "TIMEOUT"      # broker did not respond: fate unknown until reconciled
     ACKNOWLEDGED = "ACKNOWLEDGED"
     FILLED = "FILLED"
     REJECTED = "REJECTED"

@@ -1,10 +1,20 @@
 """Order management with idempotency, retry, and reconciliation."""
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from src.broker.base import Broker
 from src.broker.mock_broker import BrokerTimeout, BrokerRejected, BrokerDisconnected
+from src.broker.retry import RetryConfig
 from src.core.order import Order, Fill, Side, OrderStatus
+from src.observability.events import (
+    EventLogger,
+    TradingEvent,
+    create_order_submitted_event,
+    create_order_filled_event,
+    create_order_rejected_event,
+)
 
 
 @dataclass
@@ -28,8 +38,8 @@ class OrderManager:
     Responsibilities:
     -----------------
     - Idempotent order submission (safe to retry same client_order_id)
-    - State tracking (PENDING → SUBMITTED → FILLED/REJECTED)
-    - Retry logic for timeouts
+    - State tracking (PENDING → SUBMITTED → FILLED/REJECTED, or TIMEOUT)
+    - Retry logic for timeouts, with exponential backoff
     - Reconciliation after network failures
     - Restart recovery support
     
@@ -46,15 +56,28 @@ class OrderManager:
     - Generate signals (Indicator/Strategy's job)
     """
 
-    def __init__(self, broker: Broker, max_retry_attempts: int = 3):
+    def __init__(
+        self,
+        broker: Broker,
+        max_retry_attempts: int = 3,
+        retry_base_delay: float = 0.1,
+        sleep_func: Callable[[float], None] = time.sleep,
+        event_logger: EventLogger | None = None,
+    ):
         """Initialize order manager.
-        
+
         Args:
             broker: Broker interface for order submission
-            max_retry_attempts: Maximum retries for timeout scenarios
+            max_retry_attempts: Maximum attempts for timeout scenarios
+            retry_base_delay: First backoff delay in seconds (doubles each retry)
+            sleep_func: Injectable sleep, so tests don't actually wait
+            event_logger: Optional sink for ORDER_* events (e.g. StructuredLogger)
         """
         self.broker = broker
         self.max_retry_attempts = max_retry_attempts
+        self._retry_config = RetryConfig(max_attempts=max_retry_attempts, base_delay=retry_base_delay)
+        self._sleep = sleep_func
+        self._event_logger = event_logger
         
         # Track all orders by client_order_id
         self._orders: dict[str, OrderRecord] = {}
@@ -83,6 +106,7 @@ class OrderManager:
             Fill object
             
         Raises:
+            ValueError: client_order_id was already used for a different order
             BrokerRejected: Order was rejected by broker
             BrokerDisconnected: Broker connection is down
             BrokerTimeout: Max retries exceeded after timeouts
@@ -101,7 +125,17 @@ class OrderManager:
         # Check if we've seen this order before (idempotency check)
         if order.client_order_id in self._orders:
             record = self._orders[order.client_order_id]
-            
+
+            # Reusing an id for a different order would silently return the
+            # wrong fill - that's a caller bug, not a retry.
+            existing = record.order
+            if (existing.instrument, existing.side, existing.quantity) != (instrument, side, quantity):
+                raise ValueError(
+                    f"client_order_id {order.client_order_id} already used for "
+                    f"{existing.side.value} {existing.quantity} {existing.instrument}"
+                )
+            order = existing
+
             # If already filled, return existing fill
             if record.status == OrderStatus.FILLED and record.fill:
                 return record.fill
@@ -122,26 +156,35 @@ class OrderManager:
         
         # Attempt submission with retry logic
         for attempt in range(self.max_retry_attempts):
+            delay = self._retry_config.calculate_delay(attempt)
+            if delay > 0:
+                self._sleep(delay)
+
             record.submit_attempts += 1
             record.last_attempt_time = datetime.now(UTC)
-            record.status = OrderStatus.PENDING
-            
+            record.status = OrderStatus.SUBMITTED
+            self._emit(create_order_submitted_event(
+                order.client_order_id, order.instrument, order.side.value, order.quantity
+            ))
+
             try:
                 # Submit to broker
                 fill = self.broker.submit_order(order)
-                
+
                 # Success - update record
                 record.status = OrderStatus.FILLED
                 record.fill = fill
+                self._emit(create_order_filled_event(
+                    order.client_order_id, fill.instrument, fill.side.value, fill.quantity, fill.price
+                ))
                 return fill
-                
+
             except BrokerTimeout:
-                # Timeout - order fate is unknown
-                # Mark as ACKNOWLEDGED (might have reached broker)
-                record.status = OrderStatus.ACKNOWLEDGED
-                
+                # Timeout - order fate is unknown (it may have reached the broker)
+                record.status = OrderStatus.TIMEOUT
+
                 if attempt < self.max_retry_attempts - 1:
-                    # Retry (idempotent - broker handles duplicate)
+                    # Retry after backoff (idempotent - broker handles duplicate)
                     continue
                 else:
                     # Max retries exceeded
@@ -153,6 +196,7 @@ class OrderManager:
                 # Rejected - no retry
                 record.status = OrderStatus.REJECTED
                 record.rejection_reason = str(e)
+                self._emit(create_order_rejected_event(order.client_order_id, order.instrument, str(e)))
                 raise
                 
             except BrokerDisconnected:
@@ -162,6 +206,10 @@ class OrderManager:
         
         # Should never reach here (loop always returns or raises)
         raise RuntimeError("Unexpected control flow in submit_order")
+
+    def _emit(self, event: TradingEvent) -> None:
+        if self._event_logger is not None:
+            self._event_logger.log_event(event)
 
     def get_order_status(self, client_order_id: str) -> OrderStatus:
         """Get current status of an order.

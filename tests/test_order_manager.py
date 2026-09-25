@@ -190,7 +190,7 @@ def test_order_manager_reconcile_order():
     except BrokerTimeout:
         pass
     
-    assert om.get_order_status("test123") == OrderStatus.ACKNOWLEDGED
+    assert om.get_order_status("test123") == OrderStatus.TIMEOUT
     
     # Simulate broker providing fill later
     from src.core.order import Fill
@@ -331,3 +331,58 @@ def test_order_manager_restart_recovery_scenario():
     # Now OrderManager knows about it
     assert len(om_after_restart.get_all_orders()) == 1
     assert om_after_restart.get_order_status("pre_crash") == OrderStatus.FILLED
+
+
+def test_timeout_marks_order_timeout_not_acknowledged():
+    """A timeout means fate unknown - status TIMEOUT until reconciled."""
+    om = OrderManager(MockBroker(force_outcome="timeout"), max_retry_attempts=1)
+    with pytest.raises(BrokerTimeout):
+        om.submit_order("NIFTY", Side.BUY, 1, client_order_id="t1")
+    assert om.get_order_status("t1") == OrderStatus.TIMEOUT
+
+
+def test_retries_use_exponential_backoff():
+    """Retries wait base, 2x base, ... between attempts (none before the first)."""
+    sleeps: list[float] = []
+    om = OrderManager(
+        MockBroker(force_outcome="timeout"),
+        max_retry_attempts=3,
+        retry_base_delay=0.5,
+        sleep_func=sleeps.append,
+    )
+    with pytest.raises(BrokerTimeout):
+        om.submit_order("NIFTY", Side.BUY, 1, client_order_id="t2")
+    assert sleeps == [0.5, 1.0]
+
+
+def test_reusing_client_order_id_for_different_order_raises():
+    """Same id with different side/qty is a caller bug - must not return the old fill."""
+    om = OrderManager(MockBroker())
+    om.submit_order("NIFTY", Side.BUY, 1, client_order_id="dup")
+    with pytest.raises(ValueError, match="already used"):
+        om.submit_order("NIFTY", Side.SELL, 1, client_order_id="dup")
+    with pytest.raises(ValueError, match="already used"):
+        om.submit_order("NIFTY", Side.BUY, 2, client_order_id="dup")
+
+
+def test_order_manager_emits_events():
+    """Submitted/filled/rejected events reach an injected event logger."""
+    from src.observability.events import EventType
+
+    class Collect:
+        def __init__(self):
+            self.events = []
+
+        def log_event(self, event):
+            self.events.append(event)
+
+    sink = Collect()
+    om = OrderManager(MockBroker(), event_logger=sink)
+    om.submit_order("NIFTY", Side.BUY, 1, client_order_id="e1")
+    assert [e.event_type for e in sink.events] == [EventType.ORDER_SUBMITTED, EventType.ORDER_FILLED]
+
+    sink.events.clear()
+    om = OrderManager(MockBroker(force_outcome="reject"), event_logger=sink)
+    with pytest.raises(BrokerRejected):
+        om.submit_order("NIFTY", Side.BUY, 1, client_order_id="e2")
+    assert sink.events[-1].event_type == EventType.ORDER_REJECTED
