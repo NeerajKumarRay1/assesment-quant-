@@ -11,6 +11,10 @@ pip install -e .[dev]
 # Run tests
 python -m pytest
 
+# Launch the dashboard
+pip install -e .[dashboard]
+streamlit run dashboard/app.py
+
 # Run demonstrations
 python examples/grid_backtest_example.py
 python examples/async_feed_example.py
@@ -64,6 +68,24 @@ The system is broker-agnostic and designed for clean separation between data sou
 
 The async queue architecture demonstrates production patterns for handling real-time market data without requiring actual broker API access during development and testing.
 
+## Dashboard
+
+A minimal Streamlit console (`dashboard/app.py`) over the real engine - every number comes from the
+strategy, risk, backtest and reconciliation code, never from the UI layer.
+
+- **Controls (sidebar)**: strategy (Grid / Stop-and-Reverse) and its parameters, position cap, kill switch,
+  macro proxies (volatility / trend / sentiment) with regime overrides, synthetic market data, lot size,
+  slippage, brokerage, capital
+- **Status strip**: regime + score, circuit breaker, kill switch, reconciliation - each with icon and label
+- **KPIs**: net / gross P&L, transaction costs, slippage, trades, final position
+- **Tabs**: price with buy/sell fills, equity and position; RSI / ATR / EMA / OBV; trade blotter (CSV
+  download); reconciliation table and risk rejections
+
+The UI is a thin view over `src/dashboard/pipeline.py::run_session`, which is unit-tested on its own
+(`tests/test_dashboard_pipeline.py`). Each run recomputes P&L from the blotter with `Decimal`
+average-cost math and requires the engine's numbers to match **to the paisa**. `tests/test_dashboard_app.py`
+renders the app headlessly with Streamlit's `AppTest`.
+
 ## Observability and Reconciliation
 
 Phase 3 adds a comprehensive observability layer providing structured logging, trade blotters, and reconciliation:
@@ -72,7 +94,7 @@ Phase 3 adds a comprehensive observability layer providing structured logging, t
 - **JSON event logging**: Machine-readable logs with consistent schema
 - **Event types**: ORDER_SUBMITTED, ORDER_FILLED, ORDER_REJECTED, POSITION_CHANGED, RISK_REJECTED, CIRCUIT_BREAKER_TRIGGERED, RECONCILIATION_MISMATCH, etc.
 - **Log levels**: Automatic level assignment (INFO for fills, WARNING for rejections, ERROR for mismatches)
-- **Security**: Sensitive fields (tokens, passwords) automatically filtered
+- **Security**: Sensitive fields (any key containing token, password, secret, api_key, etc.) filtered at every nesting level
 
 ### Trade Blotter
 - **Canonical record**: CSV-backed blotter records all executed trades
@@ -103,7 +125,7 @@ The observability layer integrates as a separate cross-cutting concern:
 - **Minimal coupling**: Core domain objects (Position, Order, Fill) remain unchanged
 - **Dependency injection**: Observability components injected at application boundaries
 - **Optional**: Existing code works without observability (backward compatible)
-- **Event boundaries**: Events emitted from OrderManager, RiskManager, MacroRegimeEngine
+- **Event boundaries**: OrderManager (ORDER_SUBMITTED/FILLED/REJECTED), RiskManager (RISK_REJECTED) and MacroRegimeEngine (CIRCUIT_BREAKER_TRIGGERED, REGIME_CHANGED on transitions) emit events when given an optional `event_logger` (e.g. `StructuredLogger`)
 
 ### Reconciliation Flow
 ```
@@ -165,7 +187,8 @@ Four categories with shared mathematical utilities:
 
 **Grid Strategy**
 - ATR-based dynamic spacing adapts to volatility
-- Pyramiding up to 3 levels on favorable moves
+- Pyramiding up to 3 levels, one add per grid level (entry ± k × spacing)
+- Level count derived from the actual position, so risk-rejected adds don't count
 - ATR-based stop loss
 - RSI for entry signals
 
@@ -179,6 +202,7 @@ Position and exposure controls:
 - Position caps (configurable max long/short)
 - Kill switch (blocks new exposure, allows reduction)
 - Circuit breaker integration (from macro regime)
+- Under kill switch / circuit breaker a reversal (e.g. +5 → -5) is cut to flat: closing is allowed, the new opposite position is not
 - Risk decisions with rejection reasons
 
 ### Macro Regime Engine
@@ -193,15 +217,18 @@ Market environment classification and parameter adaptation:
 ### Order Manager
 Production-ready order lifecycle management:
 - Idempotent submission using client_order_id
-- Automatic retry on timeout
+- Automatic retry on timeout with exponential backoff
+- Reusing a client_order_id for a different order raises instead of returning the wrong fill
 - State reconciliation after restarts
 - Crash recovery support
 
 ### Backtesting Engine
 Realistic historical simulation:
-- Bar-accurate fills (signal at close, fill at next open)
+- Bar-accurate fills (signal at close, fill at next open; a final-bar signal is not executed)
+- Equity curve: initial capital plus one mark-to-market point per bar close
+- Lot-size multiplier (`lot_size=`) for P&L and costs
 - Slippage modeling
-- Transaction costs (Indian futures: brokerage, STT, exchange fees, GST)
+- Transaction costs (Indian futures: brokerage, STT, exchange fees, SEBI fees, stamp duty, GST)
 - No lookahead bias
 - P&L reconciliation
 
@@ -227,7 +254,7 @@ Orders and Fills are immutable dataclasses representing facts. Position is the o
 
 ## Testing
 
-The system has 140 tests covering:
+The system has 304 tests covering:
 - Unit tests for individual components
 - Integration tests for component interaction
 - Edge cases and failure modes
@@ -280,10 +307,12 @@ src/
 ├── macro/          # Macro regime engine
 ├── execution/      # Order manager
 ├── backtest/       # Backtesting engine
+├── dashboard/      # UI-free session pipeline behind the dashboard
 └── observability/  # Logging, blotter, reconciliation, alerts (NEW)
 
+dashboard/          # Streamlit app (streamlit run dashboard/app.py)
 data/               # Sample CSV data for replay
-tests/              # 270+ tests
+tests/              # 304 tests
 examples/           # End-to-end demonstrations
 ```
 
@@ -294,6 +323,7 @@ Python >= 3.11
 pandas >= 2.2
 numpy >= 1.26
 pytest >= 8.0 (dev)
+streamlit >= 1.40 (dashboard, optional)
 ```
 
 All dependencies are standard libraries commonly used in quantitative finance.
@@ -301,22 +331,29 @@ All dependencies are standard libraries commonly used in quantitative finance.
 ## Technical Details
 
 ### Indian Futures Cost Model
-Transaction costs include:
-- Brokerage: Fixed per trade (typically Rs. 20)
-- STT: 0.0125% on sell side only
-- Exchange charges: ~0.002%
-- GST: 18% on brokerage and exchange charges
+Default rates (NSE futures, effective 1 Oct 2024; all overridable):
+- Brokerage: Fixed per order (typically Rs. 20)
+- STT: 0.02% on sell side only
+- Exchange transaction charges: 0.00173%
+- SEBI fees: Rs. 10 per crore
+- Stamp duty: 0.002% on buy side only
+- GST: 18% on brokerage, exchange charges and SEBI fees
+
+Notional = price × quantity × lot size.
 
 ### Position P&L Calculation
 - Realized P&L: Locked in when closing/reducing position
 - Unrealized P&L: Mark-to-market on current position
+- Both are scaled by the position's `multiplier` (contract lot size)
 - Both update automatically as fills are applied
 
 ### Order State Machine
 ```
-PENDING -> SUBMITTED -> ACKNOWLEDGED -> FILLED
-                                     -> REJECTED
-                     -> TIMEOUT (unknown fate)
+PENDING -> SUBMITTED -> FILLED
+                     -> REJECTED
+                     -> TIMEOUT (unknown fate) -> backoff -> SUBMITTED (retry)
+                                               -> FILLED / REJECTED via reconcile_order / mark_rejected
+Disconnect before sending leaves the order PENDING.
 ```
 
 ### Grid Strategy Logic
@@ -324,10 +361,10 @@ PENDING -> SUBMITTED -> ACKNOWLEDGED -> FILLED
 Entry: RSI < 30 (oversold) -> Long
        RSI > 70 (overbought) -> Short
 
-Pyramiding: Price moves favorable by (ATR * 1.5) -> Add level
+Pyramiding: Level k at entry ± k × (ATR * 1.5) -> Add one unit per level reached
             Limited to max_pyramid_levels
 
-Stop: Price moves adverse by (ATR * 2.5) -> Exit all
+Stop: Price moves adverse from entry by (ATR * 2.0 default; example uses 2.5) -> Exit all
 
 Grid spacing adapts to volatility via ATR
 ```
@@ -358,11 +395,12 @@ Strategies generate trading intent. Risk enforces constraints. This separation a
 - ✅ Replay and async market data feeds with back-pressure
 - ✅ Backtesting with realistic costs and slippage
 - ✅ Observability layer with structured logging, trade blotter, reconciliation, alerts
-- ✅ **276 passing tests**
+- ✅ Streamlit dashboard with paisa-level reconciliation
+- ✅ **304 passing tests**
 
 **Architecture Demonstrated (Partial):**
-- ⚠️ Broker resilience utilities (retry with exponential backoff, auth abstraction, rate limiting)
-- ⚠️ Note: These are utility components demonstrating the architecture; not integrated with mock broker
+- ✅ Exponential backoff (`RetryConfig`) used by OrderManager for timeout retries
+- ⚠️ Auth abstraction and rate limiting are utility components demonstrating the architecture; not integrated with mock broker
 
 **Not Required for Mock Environment:**
 - Live Zerodha broker API integration

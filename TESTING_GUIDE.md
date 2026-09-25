@@ -68,10 +68,7 @@ tests/
 
 ## Expected Test Count
 
-- **Phase 0 (Core):** ~140 tests
-- **Phase 1 (Infrastructure):** ~57 tests
-- **Phase 2 (Macro):** ~37 tests
-- **Total:** ~234+ tests
+- **Total:** 304 tests (`python -m pytest` after `pip install -e .[dev]`)
 
 ## Common Test Failures
 
