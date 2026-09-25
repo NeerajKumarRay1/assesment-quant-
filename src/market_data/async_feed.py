@@ -5,9 +5,12 @@ Uses asyncio.Queue for back-pressure and clean shutdown semantics.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable, Awaitable
 from typing import Protocol
 from src.core.tick import Tick
+
+logger = logging.getLogger(__name__)
 
 
 class TickSource(Protocol):
@@ -89,16 +92,16 @@ class AsyncTickProducer:
         except asyncio.CancelledError:
             # Clean cancellation
             raise
-        except Exception as e:
+        except Exception:
             # Log error but don't crash - sentinel sent in finally
-            print(f"Producer error: {e}")
+            logger.exception("Producer error")
         finally:
             # Always send sentinel when production stops
             if not self._stopped:
                 try:
                     await self._queue.put(None)
-                except:
-                    pass
+                except Exception:
+                    logger.exception("Producer failed to send end-of-stream sentinel")
 
 
 class AsyncTickConsumer:
@@ -155,9 +158,9 @@ class AsyncTickConsumer:
                 
                 try:
                     await self._handler(tick)
-                except Exception as e:
+                except Exception:
                     # Log error but continue processing
-                    print(f"Consumer handler error: {e}")
+                    logger.exception("Consumer handler error")
                 finally:
                     self._queue.task_done()
                     

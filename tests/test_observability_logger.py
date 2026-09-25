@@ -36,26 +36,29 @@ def test_structured_logger_logs_event():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        event = create_order_filled_event(
-            order_id="order123",
-            instrument="NIFTY",
-            side="BUY",
-            quantity=50,
-            price=25000.0
-        )
-        
-        logger.log_event(event)
-        
-        # Read and verify JSON log
-        assert log_file.exists()
-        with open(log_file, 'r') as f:
-            line = f.readline()
-            log_data = json.loads(line)
+        try:
+            event = create_order_filled_event(
+                order_id="order123",
+                instrument="NIFTY",
+                side="BUY",
+                quantity=50,
+                price=25000.0
+            )
             
-            assert log_data['level'] == "INFO"
-            assert log_data['event_type'] == "ORDER_FILLED"
-            assert log_data['instrument'] == "NIFTY"
-            assert log_data['metadata']['price'] == 25000.0
+            logger.log_event(event)
+            
+            # Read and verify JSON log
+            assert log_file.exists()
+            with open(log_file, 'r') as f:
+                line = f.readline()
+                log_data = json.loads(line)
+                
+                assert log_data['level'] == "INFO"
+                assert log_data['event_type'] == "ORDER_FILLED"
+                assert log_data['instrument'] == "NIFTY"
+                assert log_data['metadata']['price'] == 25000.0
+        finally:
+            logger.close()
 
 
 def test_json_formatter_filters_sensitive_fields():
@@ -86,23 +89,26 @@ def test_logger_no_credentials_leaked():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        event = TradingEvent(
-            timestamp=datetime.now(UTC),
-            event_type=EventType.ORDER_FILLED,
-            message="Test",
-            metadata={
-                'token': 'secret_token',
-                'price': 25000.0
-            }
-        )
-        
-        logger.log_event(event)
-        
-        # Verify token not in log
-        with open(log_file, 'r') as f:
-            content = f.read()
-            assert 'secret_token' not in content
-            assert '25000.0' in content
+        try:
+            event = TradingEvent(
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ORDER_FILLED,
+                message="Test",
+                metadata={
+                    'token': 'secret_token',
+                    'price': 25000.0
+                }
+            )
+            
+            logger.log_event(event)
+            
+            # Verify token not in log
+            with open(log_file, 'r') as f:
+                content = f.read()
+                assert 'secret_token' not in content
+                assert '25000.0' in content
+        finally:
+            logger.close()
 
 
 def test_log_levels_for_event_types():
@@ -113,43 +119,46 @@ def test_log_levels_for_event_types():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        # INFO level event
-        info_event = TradingEvent(
-            timestamp=datetime.now(UTC),
-            event_type=EventType.ORDER_FILLED,
-            message="Order filled"
-        )
-        logger.log_event(info_event)
-        
-        # WARNING level event
-        warning_event = TradingEvent(
-            timestamp=datetime.now(UTC),
-            event_type=EventType.RISK_REJECTED,
-            message="Risk rejected"
-        )
-        logger.log_event(warning_event)
-        
-        # ERROR level event
-        error_event = TradingEvent(
-            timestamp=datetime.now(UTC),
-            event_type=EventType.ENGINE_ERROR,
-            message="Engine error"
-        )
-        logger.log_event(error_event)
-        
-        # Read log and check levels
-        with open(log_file, 'r') as f:
-            lines = f.readlines()
-            assert len(lines) == 3
+        try:
+            # INFO level event
+            info_event = TradingEvent(
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ORDER_FILLED,
+                message="Order filled"
+            )
+            logger.log_event(info_event)
             
-            info_log = json.loads(lines[0])
-            assert info_log['level'] == "INFO"
+            # WARNING level event
+            warning_event = TradingEvent(
+                timestamp=datetime.now(UTC),
+                event_type=EventType.RISK_REJECTED,
+                message="Risk rejected"
+            )
+            logger.log_event(warning_event)
             
-            warning_log = json.loads(lines[1])
-            assert warning_log['level'] == "WARNING"
+            # ERROR level event
+            error_event = TradingEvent(
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ENGINE_ERROR,
+                message="Engine error"
+            )
+            logger.log_event(error_event)
             
-            error_log = json.loads(lines[2])
-            assert error_log['level'] == "ERROR"
+            # Read log and check levels
+            with open(log_file, 'r') as f:
+                lines = f.readlines()
+                assert len(lines) == 3
+                
+                info_log = json.loads(lines[0])
+                assert info_log['level'] == "INFO"
+                
+                warning_log = json.loads(lines[1])
+                assert warning_log['level'] == "WARNING"
+                
+                error_log = json.loads(lines[2])
+                assert error_log['level'] == "ERROR"
+        finally:
+            logger.close()
 
 
 def test_log_info_warning_error_methods():
@@ -158,23 +167,26 @@ def test_log_info_warning_error_methods():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        logger.log_info("Info message", price=25000.0)
-        logger.log_warning("Warning message", reason="test")
-        logger.log_error("Error message", error="failure")
-        
-        with open(log_file, 'r') as f:
-            lines = f.readlines()
-            assert len(lines) == 3
+        try:
+            logger.log_info("Info message", price=25000.0)
+            logger.log_warning("Warning message", reason="test")
+            logger.log_error("Error message", error="failure")
             
-            info = json.loads(lines[0])
-            assert info['level'] == "INFO"
-            assert info['message'] == "Info message"
-            
-            warning = json.loads(lines[1])
-            assert warning['level'] == "WARNING"
-            
-            error = json.loads(lines[2])
-            assert error['level'] == "ERROR"
+            with open(log_file, 'r') as f:
+                lines = f.readlines()
+                assert len(lines) == 3
+                
+                info = json.loads(lines[0])
+                assert info['level'] == "INFO"
+                assert info['message'] == "Info message"
+                
+                warning = json.loads(lines[1])
+                assert warning['level'] == "WARNING"
+                
+                error = json.loads(lines[2])
+                assert error['level'] == "ERROR"
+        finally:
+            logger.close()
 
 
 def test_valid_json_output():
@@ -183,21 +195,39 @@ def test_valid_json_output():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        # Log various events
-        for i in range(5):
-            event = create_order_filled_event(
-                order_id=f"order{i}",
-                instrument="NIFTY",
-                side="BUY",
-                quantity=50,
-                price=25000.0 + i
-            )
-            logger.log_event(event)
-        
-        # Verify all lines are valid JSON
-        with open(log_file, 'r') as f:
-            for line in f:
-                data = json.loads(line)  # Will raise if invalid
-                assert 'timestamp' in data
-                assert 'level' in data
-                assert 'message' in data
+        try:
+            # Log various events
+            for i in range(5):
+                event = create_order_filled_event(
+                    order_id=f"order{i}",
+                    instrument="NIFTY",
+                    side="BUY",
+                    quantity=50,
+                    price=25000.0 + i
+                )
+                logger.log_event(event)
+            
+            # Verify all lines are valid JSON
+            with open(log_file, 'r') as f:
+                for line in f:
+                    data = json.loads(line)  # Will raise if invalid
+                    assert 'timestamp' in data
+                    assert 'level' in data
+                    assert 'message' in data
+        finally:
+            logger.close()
+
+
+def test_json_formatter_filters_sensitive_key_variants_and_nested():
+    """Keys containing a sensitive term are dropped, at any nesting depth."""
+    formatter = JSONFormatter()
+    data = {
+        "kite_access_token": "abc",
+        "API_SECRET": "def",
+        "order_id": "o1",
+        "broker": {"user": "u1", "refresh_token": "ghi", "legs": [{"password": "p", "qty": 1}]},
+    }
+
+    filtered = formatter._filter_sensitive(data)
+
+    assert filtered == {"order_id": "o1", "broker": {"user": "u1", "legs": [{"qty": 1}]}}

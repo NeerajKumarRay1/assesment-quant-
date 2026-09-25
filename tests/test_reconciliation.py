@@ -165,21 +165,23 @@ def test_pnl_mismatch_outside_tolerance():
 
 def test_floating_point_tolerance():
     """Tolerance handles floating point comparison correctly."""
+    # Test case 1: Within tolerance (should match)
     mismatch = reconcile_pnl(
         expected=10000.00,
         actual=9999.99,
         tolerance=0.05
     )
     
-    assert mismatch.is_match is False  # Outside tolerance
+    assert mismatch.is_match is True  # Within tolerance (diff = 0.01 <= 0.05)
     
+    # Test case 2: Outside tolerance (should not match)
     mismatch2 = reconcile_pnl(
         expected=10000.00,
-        actual=9999.99,
-        tolerance=0.02
+        actual=9999.90,  # diff = 0.10 > 0.05
+        tolerance=0.05
     )
     
-    assert mismatch2.is_match is True  # Within tolerance
+    assert mismatch2.is_match is False  # Outside tolerance
 
 
 def test_format_report():
@@ -296,3 +298,15 @@ def test_empty_reconciliation():
     
     assert result.matched is True
     assert len(result.position_mismatches) == 0
+
+
+def test_position_mismatch_respects_tolerance():
+    """Per-symbol is_match must agree with the overall matched flag under tolerance."""
+    internal = {"NIFTY": Position("NIFTY", quantity=10)}
+    broker = {"NIFTY": 11}
+
+    result = reconcile_positions(internal, broker, tolerance=1)
+
+    assert result.matched is True
+    assert result.position_mismatches[0].is_match is True
+    assert result.has_position_mismatches() is False

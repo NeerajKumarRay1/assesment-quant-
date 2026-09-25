@@ -8,9 +8,19 @@ Demonstrates:
 - Alert generation on mismatches
 """
 
+import sys
+import os
 import tempfile
 from pathlib import Path
 from datetime import datetime, UTC
+
+# Output uses ✓/→/₹; Windows consoles default to cp1252 and would crash on print
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
+# Add parent directory to path so we can import src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.core.order import Fill, Side
 from src.core.position import Position
 from src.observability import (
@@ -282,6 +292,9 @@ def main():
         print("  ✓ Complete reconciliation reporting")
         print("\nThe observability layer operates independently of trading logic,")
         print("providing transparency and auditability for all trading operations.")
+        
+        # Close logger to release file handles before temp directory cleanup
+        logger.close()
 
 
 if __name__ == "__main__":

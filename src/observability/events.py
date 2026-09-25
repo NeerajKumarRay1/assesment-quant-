@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, UTC
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 
 class EventType(Enum):
@@ -198,3 +198,14 @@ def create_reconciliation_mismatch_event(
             "difference": actual - expected
         }
     )
+
+
+class EventLogger(Protocol):
+    """Anything that can record a TradingEvent (StructuredLogger satisfies this).
+
+    Trading components accept an optional EventLogger so observability stays
+    injected at the boundary rather than hard-wired into domain logic.
+    """
+
+    def log_event(self, event: TradingEvent) -> None:
+        ...

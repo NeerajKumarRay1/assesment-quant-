@@ -25,37 +25,41 @@ def test_order_filled_to_logger_and_blotter():
         logger = StructuredLogger("test", log_file=log_file)
         blotter = TradeBlotter(blotter_file)
         
-        # Create fill
-        fill = Fill(
-            order_id="order123",
-            instrument="NIFTY",
-            side=Side.BUY,
-            quantity=50,
-            price=25000.0,
-            fill_id="fill123"
-        )
-        
-        # Log event
-        event = create_order_filled_event(
-            order_id=fill.order_id,
-            instrument=fill.instrument,
-            side=fill.side.value,
-            quantity=fill.quantity,
-            price=fill.price
-        )
-        logger.log_event(event)
-        
-        # Record to blotter
-        blotter.record_fill(fill, strategy="Grid", costs=20.0, realized_pnl=100.0)
-        blotter.flush()
-        
-        # Verify both
-        assert log_file.exists()
-        assert blotter_file.exists()
-        
-        trades = blotter.read_trades()
-        assert len(trades) == 1
-        assert trades[0].fill_id == "fill123"
+        try:
+            # Create fill
+            fill = Fill(
+                order_id="order123",
+                instrument="NIFTY",
+                side=Side.BUY,
+                quantity=50,
+                price=25000.0,
+                fill_id="fill123"
+            )
+            
+            # Log event
+            event = create_order_filled_event(
+                order_id=fill.order_id,
+                instrument=fill.instrument,
+                side=fill.side.value,
+                quantity=fill.quantity,
+                price=fill.price
+            )
+            logger.log_event(event)
+            
+            # Record to blotter
+            blotter.record_fill(fill, strategy="Grid", costs=20.0, realized_pnl=100.0)
+            blotter.flush()
+            
+            # Verify both
+            assert log_file.exists()
+            assert blotter_file.exists()
+            
+            trades = blotter.read_trades()
+            assert len(trades) == 1
+            assert trades[0].fill_id == "fill123"
+        finally:
+            # Always close logger to release file handles
+            logger.close()
 
 
 def test_position_change_logged():
@@ -64,33 +68,36 @@ def test_position_change_logged():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        position = Position("NIFTY", quantity=0)
-        
-        # Apply fill
-        fill = Fill(
-            order_id="order1",
-            instrument="NIFTY",
-            side=Side.BUY,
-            quantity=50,
-            price=25000.0
-        )
-        
-        old_qty = position.quantity
-        position.apply_fill(fill)
-        new_qty = position.quantity
-        
-        # Log position change (application layer would do this)
-        from src.observability.events import create_position_changed_event
-        event = create_position_changed_event(
-            instrument="NIFTY",
-            old_quantity=old_qty,
-            new_quantity=new_qty,
-            realized_pnl=position.realized_pnl
-        )
-        logger.log_event(event)
-        
-        # Verify logged
-        assert log_file.exists()
+        try:
+            position = Position("NIFTY", quantity=0)
+            
+            # Apply fill
+            fill = Fill(
+                order_id="order1",
+                instrument="NIFTY",
+                side=Side.BUY,
+                quantity=50,
+                price=25000.0
+            )
+            
+            old_qty = position.quantity
+            position.apply_fill(fill)
+            new_qty = position.quantity
+            
+            # Log position change (application layer would do this)
+            from src.observability.events import create_position_changed_event
+            event = create_position_changed_event(
+                instrument="NIFTY",
+                old_quantity=old_qty,
+                new_quantity=new_qty,
+                realized_pnl=position.realized_pnl
+            )
+            logger.log_event(event)
+            
+            # Verify logged
+            assert log_file.exists()
+        finally:
+            logger.close()
 
 
 def test_risk_rejection_logged():
@@ -99,15 +106,18 @@ def test_risk_rejection_logged():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        from src.observability.events import create_risk_rejected_event
-        event = create_risk_rejected_event(
-            instrument="NIFTY",
-            desired_quantity=100,
-            reason="Position cap exceeded"
-        )
-        logger.log_event(event)
-        
-        assert log_file.exists()
+        try:
+            from src.observability.events import create_risk_rejected_event
+            event = create_risk_rejected_event(
+                instrument="NIFTY",
+                desired_quantity=100,
+                reason="Position cap exceeded"
+            )
+            logger.log_event(event)
+            
+            assert log_file.exists()
+        finally:
+            logger.close()
 
 
 def test_circuit_breaker_alert():
@@ -238,43 +248,46 @@ def test_complete_order_lifecycle():
         blotter = TradeBlotter(blotter_file)
         alert_sink = CollectingAlertSink()
         
-        # 1. Order submitted
-        from src.observability.events import create_order_submitted_event
-        submit_event = create_order_submitted_event(
-            client_order_id="order1",
-            instrument="NIFTY",
-            side="BUY",
-            quantity=50
-        )
-        logger.log_event(submit_event)
-        
-        # 2. Order filled
-        fill = Fill(
-            order_id="order1",
-            instrument="NIFTY",
-            side=Side.BUY,
-            quantity=50,
-            price=25000.0,
-            fill_id="fill1"
-        )
-        
-        fill_event = create_order_filled_event(
-            order_id=fill.order_id,
-            instrument=fill.instrument,
-            side=fill.side.value,
-            quantity=fill.quantity,
-            price=fill.price
-        )
-        logger.log_event(fill_event)
-        
-        # 3. Record to blotter
-        blotter.record_fill(fill, strategy="Grid", costs=20.0)
-        blotter.flush()
-        
-        # 4. Verify observability
-        assert log_file.exists()
-        assert blotter_file.exists()
-        assert len(alert_sink) == 0  # No alerts for normal fills
+        try:
+            # 1. Order submitted
+            from src.observability.events import create_order_submitted_event
+            submit_event = create_order_submitted_event(
+                client_order_id="order1",
+                instrument="NIFTY",
+                side="BUY",
+                quantity=50
+            )
+            logger.log_event(submit_event)
+            
+            # 2. Order filled
+            fill = Fill(
+                order_id="order1",
+                instrument="NIFTY",
+                side=Side.BUY,
+                quantity=50,
+                price=25000.0,
+                fill_id="fill1"
+            )
+            
+            fill_event = create_order_filled_event(
+                order_id=fill.order_id,
+                instrument=fill.instrument,
+                side=fill.side.value,
+                quantity=fill.quantity,
+                price=fill.price
+            )
+            logger.log_event(fill_event)
+            
+            # 3. Record to blotter
+            blotter.record_fill(fill, strategy="Grid", costs=20.0)
+            blotter.flush()
+            
+            # 4. Verify observability
+            assert log_file.exists()
+            assert blotter_file.exists()
+            assert len(alert_sink) == 0  # No alerts for normal fills
+        finally:
+            logger.close()
 
 
 def test_rollover_event_logged():
@@ -283,15 +296,18 @@ def test_rollover_event_logged():
         log_file = Path(tmpdir) / "test.log"
         logger = StructuredLogger("test", log_file=log_file)
         
-        from src.observability.events import EventType, TradingEvent
-        
-        rollover_event = TradingEvent(
-            timestamp=datetime.now(UTC),
-            event_type=EventType.ROLLOVER_REQUIRED,
-            message="NIFTY contract expiring soon",
-            instrument="NIFTY",
-            metadata={"expiry": "2026-09-24", "days_until": 6}
-        )
-        logger.log_event(rollover_event)
-        
-        assert log_file.exists()
+        try:
+            from src.observability.events import EventType, TradingEvent
+            
+            rollover_event = TradingEvent(
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ROLLOVER_REQUIRED,
+                message="NIFTY contract expiring soon",
+                instrument="NIFTY",
+                metadata={"expiry": "2026-09-24", "days_until": 6}
+            )
+            logger.log_event(rollover_event)
+            
+            assert log_file.exists()
+        finally:
+            logger.close()

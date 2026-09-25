@@ -15,6 +15,10 @@ import sys
 import os
 import pandas as pd
 
+# Output uses ✓/→/₹; Windows consoles default to cp1252 and would crash on print
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 # Add parent directory to path so we can import src
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

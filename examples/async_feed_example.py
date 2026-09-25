@@ -1,7 +1,17 @@
 """Example demonstrating async market data feed with replay data."""
 
 import asyncio
+import sys
+import os
 from pathlib import Path
+
+# Output uses ✓/→/₹; Windows consoles default to cp1252 and would crash on print
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
+# Add parent directory to path so we can import src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.market_data.replay_market_data import ReplayMarketData
 from src.market_data.async_feed import AsyncMarketDataFeed
 from src.core.tick import Tick

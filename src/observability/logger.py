@@ -46,21 +46,36 @@ class JSONFormatter(logging.Formatter):
             filtered_metadata = self._filter_sensitive(record.metadata)
             log_data['metadata'] = filtered_metadata
         
-        return json.dumps(log_data)
+        return json.dumps(log_data, default=str)
     
     def _filter_sensitive(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Remove sensitive fields from data.
-        
+        """Remove sensitive fields from data, recursively.
+
+        A key is sensitive if it contains any SENSITIVE_FIELDS term, so
+        variants like 'kite_access_token' or 'API_SECRET' are caught too.
+        Nested dicts (and dicts inside lists) are filtered as well.
+
         Args:
             data: Dictionary that may contain sensitive fields
-            
+
         Returns:
             Dictionary with sensitive fields removed
         """
         return {
-            k: v for k, v in data.items()
-            if k.lower() not in self.SENSITIVE_FIELDS
+            k: self._filter_value(v) for k, v in data.items()
+            if not self._is_sensitive_key(k)
         }
+
+    def _is_sensitive_key(self, key: Any) -> bool:
+        lowered = str(key).lower()
+        return any(term in lowered for term in self.SENSITIVE_FIELDS)
+
+    def _filter_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return self._filter_sensitive(value)
+        if isinstance(value, (list, tuple)):
+            return [self._filter_value(v) for v in value]
+        return value
 
 
 class StructuredLogger:
@@ -176,3 +191,9 @@ class StructuredLogger:
         
         # Everything else is INFO
         return logging.INFO
+    
+    def close(self) -> None:
+        """Close logger and all handlers."""
+        for handler in self.logger.handlers[:]:
+            handler.close()
+            self.logger.removeHandler(handler)

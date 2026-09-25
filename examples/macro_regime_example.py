@@ -1,6 +1,16 @@
 """Demonstration of macro regime engine with various market conditions."""
 
+import sys
+import os
 from datetime import datetime, UTC
+
+# Output uses ✓/→/₹; Windows consoles default to cp1252 and would crash on print
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
+# Add parent directory to path so we can import src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.macro.regime import MacroSnapshot, Regime
 from src.macro.config import MacroRegimeConfig, RegimeParameters
 from src.macro.engine import MacroRegimeEngine

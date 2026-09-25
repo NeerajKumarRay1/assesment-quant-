@@ -12,11 +12,12 @@ class PositionMismatch:
     expected_quantity: int
     actual_quantity: int
     difference: int
-    
+    tolerance: int = 0
+
     @property
     def is_match(self) -> bool:
-        """Check if positions match."""
-        return self.difference == 0
+        """Check if positions match within tolerance."""
+        return abs(self.difference) <= self.tolerance
 
 
 @dataclass
@@ -115,12 +116,13 @@ def reconcile_positions(
             symbol=symbol,
             expected_quantity=expected_qty,
             actual_quantity=actual_qty,
-            difference=difference
+            difference=difference,
+            tolerance=tolerance
         )
         mismatches.append(mismatch)
     
     # Overall match status
-    matched = all(abs(m.difference) <= tolerance for m in mismatches)
+    matched = all(m.is_match for m in mismatches)
     
     return ReconciliationResult(
         timestamp=datetime.now(UTC),

@@ -370,3 +370,26 @@ def test_negative_weights_raise_error():
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "non-negative" in str(e)
+
+
+def test_engine_emits_events_on_transitions_only():
+    """Circuit breaker and regime changes are logged once per transition."""
+    from src.observability.events import EventType
+
+    class Collect:
+        def __init__(self):
+            self.events = []
+
+        def log_event(self, event):
+            self.events.append(event)
+
+    sink = Collect()
+    engine = MacroRegimeEngine(_default_config(), event_logger=sink)
+
+    engine.evaluate(_create_snapshot(volatility=0.2, trend=0.9, sentiment=0.9))   # RISK_ON
+    engine.evaluate(_create_snapshot(volatility=0.2, trend=0.9, sentiment=0.9))   # same
+    engine.evaluate(_create_snapshot(volatility=3.0, trend=-0.9, sentiment=-0.9)) # RISK_OFF + CB
+    engine.evaluate(_create_snapshot(volatility=3.0, trend=-0.9, sentiment=-0.9)) # same
+
+    types = [e.event_type for e in sink.events]
+    assert types == [EventType.CIRCUIT_BREAKER_TRIGGERED, EventType.REGIME_CHANGED]

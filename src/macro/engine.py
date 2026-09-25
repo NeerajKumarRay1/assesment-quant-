@@ -4,8 +4,15 @@ Evaluates macro indicators to classify market regime and provide parameter
 overrides and circuit breaker signals for trading strategies.
 """
 
+from datetime import datetime, UTC
 from src.macro.regime import Regime, MacroSnapshot, RegimeDecision
 from src.macro.config import MacroRegimeConfig, RegimeParameters
+from src.observability.events import (
+    EventLogger,
+    EventType,
+    TradingEvent,
+    create_circuit_breaker_event,
+)
 
 
 class MacroRegimeEngine:
@@ -27,13 +34,17 @@ class MacroRegimeEngine:
     (strategies, risk manager) can consume to adjust their behavior.
     """
 
-    def __init__(self, config: MacroRegimeConfig):
+    def __init__(self, config: MacroRegimeConfig, event_logger: EventLogger | None = None):
         """Initialize macro regime engine with configuration.
-        
+
         Args:
             config: Configuration defining weights, thresholds, and parameters
+            event_logger: Optional sink for REGIME_CHANGED / CIRCUIT_BREAKER_TRIGGERED events
         """
         self._config = config
+        self._event_logger = event_logger
+        self._last_regime: Regime | None = None
+        self._last_circuit_breaker = False
 
     def evaluate(self, snapshot: MacroSnapshot) -> RegimeDecision:
         """Evaluate macro snapshot and produce regime decision.
@@ -87,7 +98,10 @@ class MacroRegimeEngine:
         # 5. Select parameters based on regime
         parameters = self._get_regime_parameters(regime)
         
-        # 6. Return decision
+        # 6. Emit events on transitions only, so a sustained state isn't re-logged every bar
+        self._emit_transitions(regime, score, circuit_breaker_active, circuit_breaker_reason)
+
+        # 7. Return decision
         return RegimeDecision(
             regime=regime,
             score=score,
@@ -95,6 +109,26 @@ class MacroRegimeEngine:
             circuit_breaker_reason=circuit_breaker_reason,
             parameters=parameters
         )
+
+    def _emit_transitions(
+        self,
+        regime: Regime,
+        score: float,
+        circuit_breaker_active: bool,
+        circuit_breaker_reason: str | None,
+    ) -> None:
+        if self._event_logger is not None:
+            if circuit_breaker_active and not self._last_circuit_breaker:
+                self._event_logger.log_event(create_circuit_breaker_event(circuit_breaker_reason or ""))
+            if self._last_regime is not None and regime != self._last_regime:
+                self._event_logger.log_event(TradingEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=EventType.REGIME_CHANGED,
+                    message=f"Regime changed: {self._last_regime.value} -> {regime.value}",
+                    metadata={"from": self._last_regime.value, "to": regime.value, "score": score},
+                ))
+        self._last_regime = regime
+        self._last_circuit_breaker = circuit_breaker_active
 
     def _check_circuit_breaker(self, snapshot: MacroSnapshot) -> tuple[bool, str | None]:
         """Check if extreme conditions warrant circuit breaker activation.
